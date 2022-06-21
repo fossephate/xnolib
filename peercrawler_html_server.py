@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+import random
 import threading
 
 from flask import Flask, Response, render_template
@@ -32,53 +33,106 @@ def bg_thread_func():
 
 @app.route("/peercrawler")
 def main_website():
-    global app, peerman, representatives
+    return render_template('index.html')
 
+
+@app.route("/peercrawler/formatted", methods=['GET'])
+def data():
+    global app, peerman, representatives
+    
     peers_copy = list(peerman.get_peers_copy())
 
     peer_list = []
     for peer in peers_copy:
         telemetry = peer.telemetry
 
+        row = {}
+
+        row["ip_port"] = str(peer.ip) + ":" + str(peer.port)
+        row["is_voting"] = peer.is_voting
+
+        if peer.score != None and peer.score != 0 and peer.score != -1:
+            row["score"] = peer.score
+
+        # TODO:
+        if False:
+            row["is_PR"] = True
+        else:
+            row["is_PR"] = False
+
         if telemetry != None:
             node_id = to_account_addr(telemetry.node_id, "node_")
-
             representative_info = representatives.find(node_id, str(peer.ip))
             aliases = [r.get("alias", " ") for r in representative_info]
             accounts = [r.get("account", " ") for r in representative_info]
             weights = [r.get("weight", " ") for r in representative_info]
 
-            peer_list.append([peer.ip,
-                              peer.port,
-                              " // ".join(filter(lambda n: isinstance(n, str), aliases)),  # filter out None values
-                              filter(lambda n: isinstance(n, str), accounts),
-                              peer.is_voting,
-                              telemetry.sig_verified,
-                              node_id,
-                              " // ".join(filter(lambda n: n is not None, weights)),
-                              telemetry.block_count,
-                              telemetry.cemented_count,
-                              telemetry.unchecked_count,
-                              telemetry.account_count,
-                              telemetry.bandwidth_cap,
-                              telemetry.peer_count,
-                              telemetry.protocol_ver,
-                              str(timedelta(seconds=telemetry.uptime)),
-                              telemetry.uptime,
-                              f"{telemetry.major_ver} {telemetry.minor_ver} {telemetry.patch_ver} {telemetry.pre_release_ver} {telemetry.maker_ver}",
-                              datetime.utcfromtimestamp(telemetry.timestamp / 1000).strftime('%Y-%m-%d %H:%M:%S'),
-                              telemetry.timestamp,
-                              peer.score])
-        else:
-            peer_list.append([peer.ip,
-                              peer.port,
-                              "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
-                              peer.score])
+            # " // ".join(filter(lambda n: isinstance(n, str), aliases)),  # filter out None values
 
-    return render_template('index.html', name=peer_list)
+            row["node_id"] = node_id
+            row["aliases"] = list(filter(lambda n: isinstance(n, str), aliases))
+            row["accounts"] = list(filter(lambda n: isinstance(n, str), accounts))
+            row["weights"] = list(filter(lambda n: isinstance(n, str), weights))
 
 
-@app.route("/peercrawler/json")
+            row["account_count"] = telemetry.account_count
+            row["bandwidth_cap"] = telemetry.bandwidth_cap
+            row["peer_count"] = telemetry.peer_count
+            row["protocol_ver"] = telemetry.protocol_ver
+
+            # row["block_count"] = telemetry.block_count
+            # row["cemented_count"] = telemetry.cemented_count
+            # row["unchecked_count"] = telemetry.unchecked_count
+            # combined:
+            # row["block_counts"] = f"{telemetry.block_count}:{telemetry.cemented_count}:{telemetry.unchecked_count}"
+            row["block_counts"] = {
+                "block_count": telemetry.block_count,
+                "cemented_count": telemetry.cemented_count,
+                "unchecked_count": telemetry.unchecked_count
+            }
+
+
+            #                   str(timedelta(seconds=telemetry.uptime)),
+            #                   telemetry.uptime,
+            #                   f"{telemetry.major_ver} {telemetry.minor_ver} {telemetry.patch_ver} {telemetry.pre_release_ver} {telemetry.maker_ver}",
+            #                   datetime.utcfromtimestamp(telemetry.timestamp / 1000).strftime('%Y-%m-%d %H:%M:%S'),
+            #                   telemetry.timestamp,
+            #                   telemetry.sig_verified,
+            row["timestamp"] = telemetry.timestamp
+            row["uptime"] = telemetry.uptime
+            row["sig_verified"] = telemetry.sig_verified
+            row["sw_version"] = f"{telemetry.major_ver} {telemetry.minor_ver} {telemetry.patch_ver} {telemetry.pre_release_ver} {telemetry.maker_ver}"
+            row["timestamp2"] = datetime.utcfromtimestamp(telemetry.timestamp / 1000).strftime('%Y-%m-%d %H:%M:%S')
+
+
+
+            # peer_list.append([peer.ip,
+            #                   peer.port,
+            #                   " // ".join(filter(lambda n: isinstance(n, str), aliases)),  # filter out None values
+            #                   filter(lambda n: isinstance(n, str), accounts),
+            #                   peer.is_voting,
+            #                   telemetry.sig_verified,
+            #                   node_id,
+            #                   " // ".join(filter(lambda n: n is not None, weights)),
+            #                   telemetry.block_count,
+            #                   telemetry.cemented_count,
+            #                   telemetry.unchecked_count,
+            #                   telemetry.account_count,
+            #                   telemetry.bandwidth_cap,
+            #                   telemetry.peer_count,
+            #                   telemetry.protocol_ver,
+            #                   str(timedelta(seconds=telemetry.uptime)),
+            #                   telemetry.uptime,
+            #                   f"{telemetry.major_ver} {telemetry.minor_ver} {telemetry.patch_ver} {telemetry.pre_release_ver} {telemetry.maker_ver}",
+            #                   datetime.utcfromtimestamp(telemetry.timestamp / 1000).strftime('%Y-%m-%d %H:%M:%S'),
+            #                   telemetry.timestamp,
+            #                   peer.score])
+        peer_list.append(row)
+    js = jsonencoder.to_json(peer_list)
+    return Response(js, status=200, mimetype="application/json")
+
+
+@app.route("/peercrawler/json", methods=['GET'])
 def json():
     global app, peerman
 

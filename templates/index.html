@@ -1,11 +1,16 @@
-<!doctype html>
-  <head>
-    <link rel="stylesheet" type="text/css" href="{{ url_for('static', filename='main.css') }}" />
-  </head>
+<!DOCTYPE html>
+<head>
+  <link rel="stylesheet" type="text/css" href="{{ url_for('static', filename='main.css') }}" />
+  <link rel="stylesheet" type="text/css" href="{{ url_for('static', filename='tabulator_site.css') }}" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- <link href="https://unpkg.com/tabulator-tables@5.2.7/dist/css/tabulator.min.css" rel="stylesheet"> -->
+  <script type="text/javascript" src="https://unpkg.com/tabulator-tables@5.2.7/dist/js/tabulator.min.js"></script>
+</head>
 
 <title>Nano Peers</title>
-<h1>Nano Peers</h1>
-<table style="width:95%", border="1", id="workers">
+<h1 class="text-5xl py-6">Nano Peers</h1>
+<div id="peer-table"></div>
+<!-- <table style="width:95%", border="1", id="workers">
 	<tr>
 		<th onclick="sortTable(0)">IPv6</th>
 		<th onclick="sortTable(1)">port</th>
@@ -54,61 +59,268 @@
             <td>{{item[20]}}</td>
         </tr>
         {% endfor %}    
-</table>
+</table> -->
+
+<script async>
+  function formatIP(cell, formatterParams) {
+    let ipPort = cell.getValue();
+    /*if (ip.contains("::ffff:")) {
+      ip = ip.replace("::ffff:", "");
+    }*/
+    const lastIndex = ipPort.lastIndexOf(":");
+    ip = ipPort.slice(0, lastIndex);
+    port = ipPort.slice(lastIndex + 1);
+    //return "<a href='/"+ip+"'>"+ip+"</a>";
+
+    if (ip.indexOf("::ffff:") > -1) {
+      ip = ip.replace("::ffff:", "");
+    }
+
+    return `<a href=''>${ip}</a><br/><a href=''>${port}</a>`;
+  }
+
+  function format_block_counts(cell, formatterParams) {
+    let block_counts = cell.getValue();
+    if (!block_counts) {
+      return "";
+    }
+    return `blocks: ${block_counts.block_count}<br/>cemented: ${block_counts.cemented_count}<br/>unchecked: ${block_counts.unchecked_count}`;
+  }
+
+  function format_block_counts2(cell, formatterParams, onRendered) {
+    //create and style holder elements
+    var holderEl = document.createElement("div");
+    var tableEl = document.createElement("div");
+
+    holderEl.style.boxSizing = "border-box";
+    holderEl.style.padding = "10px 30px 10px 10px";
+    holderEl.style.borderTop = "1px solid #333";
+    holderEl.style.borderBotom = "1px solid #333";
+    holderEl.style.background = "#ddd";
+
+    tableEl.style.border = "1px solid #333";
+    holderEl.appendChild(tableEl);
+    cell.getElement().appendChild(holderEl);
+
+    //define the table once the cell has been rendered
+    onRendered(() => {
+      //if (row.getData().col == "blue") {
+      //  row.getElement().style.backgroundColor = "#1e3b20";
+      //}
+      if (!cell.getData().block_counts) {
+        return;
+      }
+      console.log(cell.getData().block_counts);
+      var subTable = new Tabulator(tableEl, {
+        layout: "fitColumns",
+        //autoColumns: true,
+        data: cell.getData().block_counts,
+        columns: [
+          { title: "Blocks", field: "block_count" },
+          { title: "Cemented", field: "cemented_count" },
+          { title: "Unchecked", field: "unchecked_count" },
+        ],
+      });
+    });
+
+    //return the element that holds the table
+    return holderEl;
+  }
+
+  function format_aliases(cell, formatterParams) {
+    let aliases = cell.getValue();
+    if (!aliases) {
+      return "";
+    }
+    let final = "";
+    for (let i = 0; i < aliases.length; i++) {
+      let alias = aliases[i];
+      final += `<a target="_blank" style="text-decoration: none;">${alias}</a><br/>`;
+    }
+    return final;
+  }
+
+  function format_accounts(cell, formatterParams) {
+    let nano_accounts = cell.getValue();
+    if (!nano_accounts) {
+      return "";
+    }
+    let final = "";
+    for (let i = 0; i < nano_accounts.length; i++) {
+      let acc = nano_accounts[i];
+      let shortened = `${acc.substring(0, 10)}...${acc.substring(acc.length-6)}`;
+      final += `<a href="https://nano.community/${nano_accounts[i]}" target="_blank" style="text-decoration: none;">${shortened}</a><br/>`;
+    }
+    return final;
+  }
+
+  function format_node_id(cell, formatterParams) {
+    let node_id = cell.getValue();
+    if (!node_id) {
+      return "";
+    }    
+    return `${node_id.substring(0, 10)}...${node_id.substring(node_id.length-6)}`;
+  }
+
+  const render = async () => {
+    let res = await fetch("/peercrawler/formatted");
+    let data = await res.json();
+
+    // finish formating the data:
+    window.table = new Tabulator("#peer-table", {
+      index: "IP:Port",
+      data: data,
+      //autoColumns: true,
+      //layout: "fitColumns",
+      layout: "fitDataFill",
+      //responsiveLayout: "collapse",
+      columnVertAlign:"bottom",
+      //pagination: true,
+      //height:"600px",
+      //paginationSize: 5,
+      //groupBy: "is_PR",
+      columns: [
+        { title: "IP:Port", field: "ip_port", formatter: formatIP, hozAlign: "center", frozen: true },
+        
+        { title: "Friendly Name", field: "aliases", hozAlign: "center", formatter: format_aliases },
+        { title: "Nano Address", field: "accounts", hozAlign: "center", formatter: format_accounts },
+        
+        { title: "Node ID", field: "node_id", hozAlign: "center", formatter: format_node_id },
+        { title: "weight", field: "weights", hozAlign: "center" },
+        
+        { title: "Voting", field: "is_voting", hozAlign: "center", formatter: "tickCross" },
+        { title: "PR", field: "is_PR", hozAlign: "center", formatter: "tickCross" },
+        { title: "sig_verified", field: "sig_verified", hozAlign: "center", formatter: "tickCross" },
+        
+        { title: "Block Counts", field: "block_counts", formatter: format_block_counts },
+        { title: "accounts", field: "account_count", hozAlign: "center" },
+        { title: "bw_cap", field: "bandwidth_cap", hozAlign: "center" },
+        { title: "peers", field: "peer_count", hozAlign: "center" },
+        { title: "protover", field: "protocol_ver", hozAlign: "center" },
+        { title: "uptime", field: "uptime", hozAlign: "center" },
+        { title: "s/w version", field: "sw_version", hozAlign: "center" },
+        { title: "timestamp", field: "timestamp", hozAlign: "center" },
+
+        { title: "score", field: "score", hozAlign: "center" },
+        //{ title: "Block Counts", field: "block_counts", formatter: format_block_counts2 },
+      ],
+      responsiveLayoutCollapseFormatter: function (data) {
+        // data - an array of objects containing the column title and value for each cell
+        //var list = document.createElement("ul");
+        //data.forEach(function (col) {
+        //  // remove empty elements:
+        //  if (col.value == "&nbsp;") {
+        //    return;
+        //  }
+        //  let item = document.createElement("li");
+        //  item.innerHTML = "<div class='flex flex-row'><strong>" + col.title + "</strong>" + col.value + "</div>";
+        //  list.appendChild(item);
+        //});
+
+        var gridTable = document.createElement("div");
+        gridTable.className = "grid gap-2 md:grid-cols-2 lg:grid-cols-4 xl:lg:grid-cols-6 justify-center items-center max-w-[50vw]";
+        
+        let count = 0;
+        let bgClass = "bg-gray-200";
+        let bgClassDarker = "bg-gray-400";
+        data.forEach(function (col) {
+
+          // remove empty elements:
+          if (col.value == "&nbsp;") {
+            return;
+          }
+          count++;
+
+          let itemTitle = document.createElement("div");
+          itemTitle.className = "flex justify-center items-center text-center h-full";
+          itemTitle.className += " " + (count % 2 == 0 ? bgClassDarker : bgClass);
+          itemTitle.innerHTML = col.title;
+
+          let itemValue = document.createElement("div");
+          itemValue.className = "flex justify-center items-center text-center h-full";
+          itemValue.className += " " + (count % 2 == 0 ? bgClassDarker : bgClass);
+          itemValue.innerHTML = col.value;
+
+          gridTable.appendChild(itemTitle);
+          gridTable.appendChild(itemValue);
+
+        });
+
+        return Object.keys(data).length ? gridTable : "";
+      },
+    });
+  };
+
+  render();
+  //fetch('/peercrawler/json').then((res)=>{ console.log(res) })
+
+  //  var table = new Tabulator("#peer-table", {
+  //    data: {tabledata},
+  //    autoColumns:true,
+  //  });
+</script>
 
 <script>
-function sortTable(n) {
-  var table, rows, switching, i, x, y, shouldSwitch, dir, switchcount = 0;
-  table = document.getElementById("workers");
-  switching = true;
-  //Set the sorting direction to ascending:
-  dir = "asc"; 
-  /*Make a loop that will continue until
-  no switching has been done:*/
-  while (switching) {
-    //start by saying: no switching is done:
-    switching = false;
-    rows = table.rows;
-    /*Loop through all table rows (except the
-    first, which contains table headers):*/
-    for (i = 1; i < (rows.length - 1); i++) {
-      //start by saying there should be no switching:
-      shouldSwitch = false;
-      /*Get the two elements you want to compare,
-      one from current row and one from the next:*/
-      x = rows[i].getElementsByTagName("TD")[n];
-      y = rows[i + 1].getElementsByTagName("TD")[n];
-      /*check if the two rows should switch place,
-      based on the direction, asc or desc:*/
-      if (dir == "asc") {
-        if (x.innerHTML.toLowerCase() > y.innerHTML.toLowerCase()) {
-          //if so, mark as a switch and break the loop:
-          shouldSwitch= true;
-          break;
-        }
-      } else if (dir == "desc") {
-        if (x.innerHTML.toLowerCase() < y.innerHTML.toLowerCase()) {
-          //if so, mark as a switch and break the loop:
-          shouldSwitch = true;
-          break;
+  function sortTable(n) {
+    var table,
+      rows,
+      switching,
+      i,
+      x,
+      y,
+      shouldSwitch,
+      dir,
+      switchcount = 0;
+    table = document.getElementById("workers");
+    switching = true;
+    //Set the sorting direction to ascending:
+    dir = "asc";
+    /*Make a loop that will continue until
+    no switching has been done:*/
+    while (switching) {
+      //start by saying: no switching is done:
+      switching = false;
+      rows = table.rows;
+      /*Loop through all table rows (except the
+      first, which contains table headers):*/
+      for (i = 1; i < rows.length - 1; i++) {
+        //start by saying there should be no switching:
+        shouldSwitch = false;
+        /*Get the two elements you want to compare,
+        one from current row and one from the next:*/
+        x = rows[i].getElementsByTagName("TD")[n];
+        y = rows[i + 1].getElementsByTagName("TD")[n];
+        /*check if the two rows should switch place,
+        based on the direction, asc or desc:*/
+        if (dir == "asc") {
+          if (x.innerHTML.toLowerCase() > y.innerHTML.toLowerCase()) {
+            //if so, mark as a switch and break the loop:
+            shouldSwitch = true;
+            break;
+          }
+        } else if (dir == "desc") {
+          if (x.innerHTML.toLowerCase() < y.innerHTML.toLowerCase()) {
+            //if so, mark as a switch and break the loop:
+            shouldSwitch = true;
+            break;
+          }
         }
       }
-    }
-    if (shouldSwitch) {
-      /*If a switch has been marked, make the switch
-      and mark that a switch has been done:*/
-      rows[i].parentNode.insertBefore(rows[i + 1], rows[i]);
-      switching = true;
-      //Each time a switch is done, increase this count by 1:
-      switchcount ++;      
-    } else {
-      /*If no switching has been done AND the direction is "asc",
-      set the direction to "desc" and run the while loop again.*/
-      if (switchcount == 0 && dir == "asc") {
-        dir = "desc";
+      if (shouldSwitch) {
+        /*If a switch has been marked, make the switch
+        and mark that a switch has been done:*/
+        rows[i].parentNode.insertBefore(rows[i + 1], rows[i]);
         switching = true;
+        //Each time a switch is done, increase this count by 1:
+        switchcount++;
+      } else {
+        /*If no switching has been done AND the direction is "asc",
+        set the direction to "desc" and run the while loop again.*/
+        if (switchcount == 0 && dir == "asc") {
+          dir = "desc";
+          switching = true;
+        }
       }
     }
   }
-}
 </script>

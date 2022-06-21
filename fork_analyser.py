@@ -7,9 +7,10 @@ import peercrawler
 import frontier_request
 from pynanocoin import *
 from exceptions import *
+from peer import Peer
 
 
-def frontier_req(ctx, s, peer, acc_id):
+def frontier_req(ctx: dict, s: socket.socket, peer: Peer, acc_id: bytes) -> None:
     hdr = frontier_request.frontier_request.generate_header(ctx, True)
     frontier = frontier_request.frontier_request(hdr, start_account=acc_id, maxacc=1)
     s.send(frontier.serialise())
@@ -30,7 +31,7 @@ def frontier_req(ctx, s, peer, acc_id):
         (peer.ip, peer.port, hexlify(peer.aux['confirmed_frontier']), hexlify(peer.aux['unconfirmed_frontier'])))
 
 
-def pull_blocks(ctx, blockman, peer, acc):
+def pull_blocks(ctx: dict, blockman: block_manager, peer: Peer, acc: bytes) -> int:
     print('pull blocks for account %s from peer %s' % (hexlify(acc), peer))
     with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as s:
         s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
@@ -66,11 +67,11 @@ def pull_blocks(ctx, blockman, peer, acc):
         #    print(b)
 
 
-def once(ctx, workdir, forkacc):
+def once(ctx: dict, workdir: str, forkacc: bytes) -> None:
     workdir = '%s/%s' % (workdir, hexlify(forkacc))
     print(workdir)
 
-    hdr, peers = peercrawler.get_peers_from_service(ctx, addr='::ffff:46.101.61.203')
+    peers = peercrawler.get_peers_from_service(ctx)
     print('Starting a round of pulling blocks with %s peers' % len(peers))
 
     # initialise a git project in the temporary work directory

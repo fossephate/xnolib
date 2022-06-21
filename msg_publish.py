@@ -22,19 +22,20 @@ from peercrawler import get_random_peer
 from msg_handshake import node_handshake_id
 import block
 
+
 class msg_publish:
-    def __init__(self, hdr, block):
+    def __init__(self, hdr: message_header, block):
         assert(isinstance(hdr, message_header))
         self.hdr = hdr
         self.block = block
 
-    def serialise(self):
+    def serialise(self) -> bytes:
         data = self.hdr.serialise_header()
         data += self.block.serialise(False)
         return data
 
     @classmethod
-    def parse(cls, hdr, data):
+    def parse(cls, hdr: message_header, data: bytes):
         block = None
         blocktype = hdr.block_type()
         if blocktype == 2:
@@ -75,7 +76,7 @@ def read_json_block_from_stdin():
     return blk
 
 
-def main():
+def main() -> None:
     args = parse_args()
 
     ctx = livectx

@@ -1,21 +1,21 @@
 import mysql.connector
 
 
-def setup_db_connection(host="localhost", user="root",
-                        passwd = "password123", db=None):
+def setup_db_connection(host: str = "localhost", user: str = "root",
+                        passwd: str = "password123", db: str = None):
     if db is None:
         return mysql.connector.connect(host=host, user=user, passwd=passwd, auth_plugin='mysql_native_password')
     else:
         return mysql.connector.connect(host=host, user=user, passwd=passwd, database=db, auth_plugin='mysql_native_password')
 
 
-def create_new_database(cursor, name):
+def create_new_database(cursor, name: str) -> None:
     cursor.execute("CREATE DATABASE %s" % name)
     cursor.execute("USE %s" % name)
     cursor.execute("SET SQL_SAFE_UPDATES = 0")
 
 
-def create_db_structure_frontier_service(cursor):
+def create_db_structure_frontier_service(cursor) -> None:
     cursor.execute("CREATE TABLE Peers (peer_id VARCHAR(36) PRIMARY KEY, ip_address VARCHAR(50), port int, score int)")
     cursor.execute("CREATE TABLE Frontiers (peer_id VARCHAR(36), frontier_hash VARCHAR(64), " +
                    "account_hash VARCHAR(64), PRIMARY KEY(peer_id, account_hash), " +

@@ -14,39 +14,6 @@ RPC_URL = 'http://[::1]:7076'
 #RPC_URL = 'https://mynano.ninja/api/node'
 
 
-def weight_to_percentage(weight):
-    return weight * 100 / constants.max_nano_supply
-
-
-# return the rep object if endpoint is a rep and has at least 'weight' raw weight
-# return None otherwise
-def endpoint_to_rep(reps, endpoint, weight):
-    if isinstance(reps, list):
-        for rep in reps:
-            if endpoint == rep.endpoint:
-                if rep.weight >= weight:
-                    return rep
-    elif isinstance(reps, dict):
-        for acc, rep in reps.items():
-            if endpoint == rep.endpoint:
-                if rep.weight >= weight:
-                    return rep
-    else:
-        assert 0
-
-
-def get_reps_with_weights():
-    reps = []
-    for acc, rep in get_representatives().items():
-        #if isinstance(rep, str):
-        #    print('rep is string: %s' % rep)
-        #    continue
-        #print(rep)
-        if rep.weight > 0:
-            reps.append(rep)
-    return reps
-
-
 class Representative:
     def __init__(self):
         self.account = None
@@ -56,7 +23,7 @@ class Representative:
         self.protover = None
         self.voting = None
 
-    def set_weight(self, weight):
+    def set_weight(self, weight: int) -> None:
         assert isinstance(weight, int)
         self.weight      = weight
         self.weight_perc = weight_to_percentage(weight)
@@ -86,7 +53,7 @@ class Quorum:
         self.peers_stake_total            = None
         self.trended_stake_total          = None
 
-    def set_delta(self, delta):
+    def set_delta(self, delta: int) -> None:
         self.delta = delta
         self.online_weight = int(delta * (100 / self.online_weight_quorum_percent))
 
@@ -102,12 +69,45 @@ class Quorum:
         return s
 
 
-def post(session, params, timeout=5):
+def weight_to_percentage(weight: int) -> float:
+    return weight * 100 / constants.max_nano_supply
+
+
+# return the rep object if endpoint is a rep and has at least 'weight' raw weight
+# return None otherwise
+def endpoint_to_rep(reps: list[Representative], endpoint: str, weight: int) -> Representative:
+    if isinstance(reps, list):
+        for rep in reps:
+            if endpoint == rep.endpoint:
+                if rep.weight >= weight:
+                    return rep
+    elif isinstance(reps, dict):
+        for acc, rep in reps.items():
+            if endpoint == rep.endpoint:
+                if rep.weight >= weight:
+                    return rep
+    else:
+        assert 0
+
+
+def get_reps_with_weights() -> list[Representative]:
+    reps = []
+    for acc, rep in get_representatives().items():
+        #if isinstance(rep, str):
+        #    print('rep is string: %s' % rep)
+        #    continue
+        #print(rep)
+        if rep.weight > 0:
+            reps.append(rep)
+    return reps
+
+
+def post(session, params, timeout=5) -> str:
     resp = session.post(RPC_URL, json=params, timeout=5)
     return resp.json()
 
 
-def rpc_confirmation_quorum(session):
+def rpc_confirmation_quorum(session: requests.Session) -> str:
     params = {
       'action': 'confirmation_quorum',
       'peer_details': 'true',
@@ -116,7 +116,7 @@ def rpc_confirmation_quorum(session):
     return result
 
 
-def rpc_peers(session):
+def rpc_peers(session: requests.Session) -> str:
     params = {
       'action': 'peers',
       'peer_details': 'true',
@@ -125,7 +125,7 @@ def rpc_peers(session):
     return result
 
 
-def rpc_representatives(session):
+def rpc_representatives(session: requests.Session) -> str:
     params = {
       'action': 'representatives',
     }
@@ -133,7 +133,7 @@ def rpc_representatives(session):
     return result
 
 
-def get_representatives():
+def get_representatives() -> list[Representative]:
     session = requests.Session()
 
     quorum_reply = rpc_confirmation_quorum(session)
@@ -191,7 +191,7 @@ def get_representatives():
                 rep.protover = peers[endpoint]['protocol_version']
 
     # merge in voting capabilities from peercrawler
-    _, peers = peercrawler.get_peers_from_service(pynanocoin.livectx)
+    peers = peercrawler.get_peers_from_service(pynanocoin.livectx)
     for peer in peers:
         if peer.peer_id:
             for acc, rep in reps.items():
@@ -219,7 +219,7 @@ def parse_args():
     return parser.parse_args()
 
 
-def main():
+def main() -> None:
     args = parse_args()
 
     reps = get_representatives()

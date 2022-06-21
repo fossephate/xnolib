@@ -12,10 +12,11 @@ import threading
 import random
 import tracemalloc
 from exceptions import *
+from peer import Peer
 
 
 class thread_manager:
-    def __init__(self, ctx, peers, num_of_threads):
+    def __init__(self, ctx: dict, peers: list[Peer], num_of_threads: int):
         self.ctx = ctx
         self.peers = peers
         self.next_peer_index = 0
@@ -49,13 +50,13 @@ class thread_manager:
         self.min_connection_time = 100000.0
         self.max_connection_time = -1.0
 
-    def update(self):
+    def update(self) -> None:
         for t in self.threads:
             if not t.is_alive():
                 t.join()
                 self.threads.remove(t)
 
-    def get_next_peer(self):
+    def get_next_peer(self) -> Peer:
         with self.mutex:
             if self.next_peer_index >= len(self.peers):
                 self.next_peer_index = 0
@@ -63,51 +64,51 @@ class thread_manager:
             self.next_peer_index += 1
             return peer
 
-    def average_blocks_downloaded(self):
+    def average_blocks_downloaded(self) -> float:
         if self.thread_count == 0:
             return -1
         return self.total_blocks_downloaded / self.thread_count
 
-    def average_connection_time(self):
+    def average_connection_time(self) -> float:
         if self.thread_count == 0:
             return -1.0
         return self.total_connection_times / self.thread_count
 
-    def average_successful_time(self):
+    def average_successful_time(self) -> float:
         if self.successful_count == 0:
             return -1.0
         return self.total_successful_times / self.successful_count
 
-    def average_unsuccessful_time(self):
+    def average_unsuccessful_time(self) -> float:
         if self.unsuccessful_count == 0:
             return -1.0
         return self.total_unsuccessful_times / self.unsuccessful_count
 
-    def analyse_successful_time(self, t):
+    def analyse_successful_time(self, t: int) -> None:
         if t < self.min_successful_time:
             self.min_successful_time = t
         elif t > self.max_successful_time:
             self.max_successful_time = t
 
-    def analyse_unsuccessful_time(self, t):
+    def analyse_unsuccessful_time(self, t: int) -> None:
         if t < self.min_unsuccessful_time:
             self.min_unsuccessful_time = t
         elif t > self.max_unsuccessful_time:
             self.max_unsuccessful_time = t
 
-    def analyse_blocks_downloaded(self, n):
+    def analyse_blocks_downloaded(self, n: int) -> None:
         if n > self.max_blocks_downloaded:
             self.max_blocks_downloaded = n
         elif n < self.min_blocks_downloaded:
             self.min_blocks_downloaded = n
 
-    def analyse_connection_time(self, t):
+    def analyse_connection_time(self, t: int) -> None:
         if t > self.max_connection_time:
             self.max_connection_time = t
         if t < self.min_connection_time:
             self.min_connection_time = t
 
-    def str_stats(self):
+    def str_stats(self) -> str:
         string = 'Total threads ran: %d \n\n' % self.thread_count
         string += 'Socket Connection Data:\n'
         string += '    Average connection time: %f\n' % self.average_connection_time()
@@ -133,20 +134,20 @@ class thread_manager:
         string += 'Number of reps: %d\n' % len(self.representatives)
         return string
 
-    def str_reps(self):
+    def str_reps(self) -> str:
         string = ''
         for rep in self.representatives:
             string += str(rep) + '\n'
         return string
 
-    def thread_func(self, peer, account):
+    def thread_func(self, peer: Peer, account: bytes) -> None:
         try:
             self.get_representative_for_account(account, peer, self.mutex)
         finally:
             self.sem.release()
             print('Thread completed peer=%s account=%s' % (peer, hexlify(account)))
 
-    def get_account_rep(self, account):
+    def get_account_rep(self, account: bytes) -> None:
         self.sem.acquire()
         peer = self.get_next_peer()
         thread = threading.Thread(target=self.thread_func,
@@ -156,20 +157,20 @@ class thread_manager:
         self.thread_count += 1
         self.threads.append(thread)
 
-    def join(self):
+    def join(self) -> None:
         for t in self.threads:
             t.join()
             self.threads.remove(t)
         print('All threads are finished')
 
-    def get_rep_in_representatives(self, representative):
+    def get_rep_in_representatives(self, representative: bytes) -> bytes or None:
         for rep in self.representatives:
             if rep.representative == representative:
                 return rep
         return None
 
     # Remember to use mutex when using this function
-    def process_block_no_balance(self, block, endtime):
+    def process_block_no_balance(self, block, endtime: int) -> None:
         print("Block has no balance")
 
         self.no_balance_block_count += 1
@@ -178,7 +179,7 @@ class thread_manager:
         self.analyse_unsuccessful_time(endtime)
 
     # Remember to use mutex when using this function
-    def process_good_block(self, rep_block, endtime):
+    def process_good_block(self, rep_block, endtime: int) -> None:
         print('Found rep: %s' % hexlify(rep_block.representative))
 
         rep = self.get_rep_in_representatives(rep_block.representative)
@@ -193,13 +194,13 @@ class thread_manager:
         self.total_successful_times += endtime
         self.analyse_successful_time(endtime)
 
-    def process_zero_balance_block(self, endtime):
+    def process_zero_balance_block(self, endtime: int) -> None:
         print('Balance is zero')
         self.unsuccessful_count += 1
         self.total_unsuccessful_times += endtime
         self.analyse_unsuccessful_time(endtime)
 
-    def get_representative_for_account(self, acc, peer, mutex):
+    def get_representative_for_account(self, acc: bytes, peer: Peer, mutex: threading.Lock) -> None:
         starttime = time.time()
         with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as s:
             try:
@@ -260,11 +261,11 @@ class thread_manager:
 
 
 class Rep:
-    def __init__(self, representative):
+    def __init__(self, representative: bytes):
         self.representative = representative
         self.voting_power = 0
 
-    def add_voting_power(self, n):
+    def add_voting_power(self, n: int) -> None:
         self.voting_power += n
 
     def __eq__(self, other):
@@ -292,7 +293,7 @@ class memory_tracker:
         self.peak = -1
         self.thread = None
 
-    def track(self):
+    def track(self) -> None:
         assert tracemalloc.is_tracing()
 
         while self._running:
@@ -305,13 +306,13 @@ class memory_tracker:
 
             time.sleep(60)
 
-    def start(self):
+    def start(self) -> None:
         thread = threading.Thread(target=self.track,
                                   daemon=True)
         thread.start()
         self.thread = thread
 
-    def stop(self):
+    def stop(self) -> None:
         self._running = False
         self.thread.join()
 
@@ -344,14 +345,14 @@ def parse_args():
     return parser.parse_args()
 
 
-def find_rep_in_blocks(blocks):
+def find_rep_in_blocks(blocks: list):
     for b in blocks:
         if type(b) in [block_open, block_state, block_change]:
             return b
     return None
 
 
-def frontier_iter(ctx, peers, num, start_acc = b'\x00' * 32):
+def frontier_iter(ctx: dict, peers: list[Peer], num: int, start_acc: bytes = b'\x00' * 32) -> frontier_entry or None:
     with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as s:
         s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
         s.settimeout(3)
@@ -391,7 +392,7 @@ def frontier_iter(ctx, peers, num, start_acc = b'\x00' * 32):
                 continue
 
 
-def main():
+def main() -> None:
     args = parse_args()
 
     if args.mem_track:
@@ -403,7 +404,7 @@ def main():
     if args.test: ctx = testctx
     elif args.beta: ctx = betactx
 
-    hdr, peers = get_peers_from_service(ctx)
+    peers = get_peers_from_service(ctx)
     peers = list(filter(lambda p: p.score == 1000, peers))
 
     if args.ipv4:

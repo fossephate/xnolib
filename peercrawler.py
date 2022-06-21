@@ -7,17 +7,26 @@ import logging
 import sys
 import argparse
 import threading
+from _thread import interrupt_main
 from ipaddress import IPv6Address
 import jsonpickle
 from functools import reduce
-from typing import Iterable, Optional
+from typing import Collection, Iterable, Optional, Callable
+from concurrent.futures import ThreadPoolExecutor
 
+import requests
 from pydot import Dot, Node, Edge
 
+import _logger
 import confirm_req
 import telemetry_req
 from msg_handshake import *
-from logger import setup_logging
+from peer_set import peer_set
+from confirm_ack import confirm_ack
+from peer import Peer
+
+
+logger = _logger.get_logger()
 
 
 def get_telemetry(ctx, s):
@@ -30,60 +39,163 @@ def get_telemetry(ctx, s):
 
 
 class peer_manager:
-    def __init__(self, ctx, peers=[], verbosity=0, inactivity_threshold_seconds=0, logger: logging.Logger = None):
+    def __init__(self, ctx,
+                 verbosity=0,
+                 peers: Iterable[Peer] = None, inactivity_threshold_seconds=0,
+                 listen=True, listening_port=7777):
         self.ctx = ctx
         self.verbosity = verbosity
-
         self.mutex = threading.Lock()
-        self.peers: set[Peer] = set()
-        self.add_peers(peers)
+        self.listening_port = listening_port
 
-        if logger:
-            self.logger = logger
-        else:
-            self.logger = setup_logging("peercrawler")
+        self.__connections_graph: dict[Peer, peer_set] = {}
+
+        if peers:
+            for peer in peers:
+                self.add_peers(peer, [])
+
+        if listen:
+            threading.Thread(target=self.listen_incoming, daemon=True).start()
 
         if inactivity_threshold_seconds > 0:
             thread = threading.Thread(target=self.run_periodic_cleanup, args=(inactivity_threshold_seconds,), daemon=True)
             thread.start()
 
-    def add_peers(self, new_peers: Iterable[Peer]):
+    def add_peers(self, from_peer: Peer, new_peers: Iterable[Peer]):
+        def find_existing_peer(peer: Peer):
+            for p in self.__connections_graph:
+                if p == peer:
+                    return p
+
         with self.mutex:
-            for peer in new_peers:
-                if peer.ip.ipv6.is_unspecified:
+            if from_peer not in self.__connections_graph:
+                self.__connections_graph[from_peer] = peer_set()
+
+            for new_peer in new_peers:
+                if new_peer.ip.ipv6.is_unspecified:
                     continue
 
-                if self.verbosity >= 3:
-                    print('adding peer %s' % peer)
-
-                if peer in self.peers:
-                    find_peer(peer, self.peers).last_seen = int(time.time())
+                # if there's already a peer object in the graph representing the same peer as new_peer,
+                # the existing one should be used
+                if new_peer in self.__connections_graph:
+                    new_peer = find_existing_peer(new_peer)
                 else:
-                    self.peers.add(peer)
+                    self.__connections_graph[new_peer] = peer_set()
+                    logger.debug(f"Discovered new peer {new_peer}")
+
+                self.__connections_graph[from_peer].add(new_peer)
 
     def run_periodic_cleanup(self, inactivity_threshold_seconds):
         while True:
             with self.mutex:
-                cleanup_inactive_peers(self.peers, inactivity_threshold_seconds, self.verbosity)
+                for peer_collection in self.__connections_graph.values():
+                    peer_collection.cleanup_inactive(inactivity_threshold_seconds)
 
             time.sleep(inactivity_threshold_seconds)
 
-    def get_peers_copy(self):
+    def get_peers_as_list(self) -> Collection[Peer]:
         with self.mutex:
-            return copy.copy(self.peers)
+            return self.__connections_graph.keys()
+
+    def get_connections_graph(self) -> dict[Peer, set[Peer]]:
+        with self.mutex:
+            return self.__connections_graph.copy()
 
     def count_good_peers(self):
         counter = 0
-        for p in self.get_peers_copy():
+        for p in self.get_peers_as_list():
             if p.score >= 1000:
                 counter += 1
         return counter
 
     def count_peers(self):
-        return len(self.get_peers_copy())
+        return len(self.get_peers_as_list())
+
+    def listen_incoming(self):
+        with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as s:
+            try:
+                s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                s.bind(("::", self.listening_port))
+                s.listen()
+
+                semaphore = threading.BoundedSemaphore(8)
+
+                while True:
+                    semaphore.acquire()
+                    connection, address = s.accept()
+                    threading.Thread(target=self.__handle_incoming_semaphore, args=(semaphore, connection, address), daemon=True).start()
+            except:
+                logger.exception("Error occurred in listener thread")
+                interrupt_main()
+
+    def __handle_incoming_semaphore(self, semaphore: threading.BoundedSemaphore, connection: socket.socket, address):
+        try:
+            result = self.handle_incoming(connection, address, self.ctx)
+            if result:
+                self.add_peers(result[0], result[1])
+        finally:
+            semaphore.release()
+            connection.close()
+
+    @staticmethod
+    def handle_incoming(connection: socket.socket, address, ctx: dict) -> Optional[tuple[Peer, list[Peer], bool]]:
+        logger.log(_logger.VERBOSE, f"Receiving connection from {address}")
+
+        incoming_peer = Peer(ip_addr.from_string(address[0]), address[1], incoming=True)
+        incoming_peer_peers = None
+        is_voting = False
+
+        header, payload = get_next_hdr_payload(connection)
+        if header.msg_type == message_type(message_type_enum.node_id_handshake):
+            if header.is_response():
+                logger.info(f"The first node ID handshake package received from {address} has the response flag set, connection is now closing")
+                return
+
+            query = handshake_query.parse_query(header, payload)
+            signing_key, verifying_key = node_handshake_id.keypair()
+            handshake_exchange_server(ctx, connection, query, signing_key, verifying_key)
+            logger.debug(f"Successful handshake from from {address}")
+
+            telemetry_request = telemetry_req.telemetry_req(ctx)
+            connection.sendall(telemetry_request.serialise())
+
+            block = block_open(ctx["genesis_block"]["source"], ctx["genesis_block"]["representative"],
+                               ctx["genesis_block"]["account"], ctx["genesis_block"]["signature"],
+                               ctx["genesis_block"]["work"])
+            confirm_request = confirm_req.confirm_req_block(message_header(ctx['net_id'], [18, 18, 18], message_type(4), 0), block)
+            connection.sendall(confirm_request.serialise())
+
+        else:
+            logger.debug(f"First message from {address} was {header.msg_type}, connection is now closing")
+            return
+
+        start_time = time.time()
+        while incoming_peer.telemetry is None or incoming_peer_peers is None or is_voting is False:
+            if time.time() - start_time > 15:
+                logger.info(f"The time limit for receiving a keepalive and telemetry has been exceeded for {address}, connection is now closing")
+                return
+
+            header, payload = get_next_hdr_payload(connection)
+            if header.msg_type == message_type(message_type_enum.telemetry_ack):
+                incoming_peer.telemetry = telemetry_req.telemetry_ack.parse(header, payload)
+                logger.debug(f"Received telemetry from {address}")
+
+            elif header.msg_type == message_type(message_type_enum.keepalive):
+                keepalive = message_keepalive.parse_payload(header, payload)
+                logger.debug(f"Received peers from {address}")
+                incoming_peer_peers = keepalive.peers
+
+            elif header.msg_type == message_type(message_type_enum.confirm_ack):
+                confirm_response = confirm_ack.parse(header, payload)
+                if confirm_request.is_response(confirm_response):
+                    is_voting = True
+                    logger.debug(f"Received confirm_ack message from {address}")
+
+        return incoming_peer, incoming_peer_peers, is_voting
 
     def send_keepalive_packet(self, connection: socket):
-        local_peer = Peer(ip_addr(IPv6Address("::ffff:78.46.80.199")), 7777)  # this should be changed manually
+        local_peer = Peer(ip_addr(IPv6Address("::ffff:78.46.80.199")), self.listening_port)  # this should be changed manually
         packet = message_keepalive.make_packet([local_peer], self.ctx["net_id"], 18)
         connection.send(packet)
 
@@ -98,8 +210,7 @@ class peer_manager:
                 s.settimeout(10)
             except OSError as error:
                 peer.score = 0
-                if self.verbosity >= 3:
-                    print('Failed to connect to peer %s, error: %s' % (peer, error))
+                logger.log(_logger.VERBOSE, f"Failed to connect to peer {peer}", exc_info=True)
                 return []
 
             # connected to peer, do handshake followed by listening for the first keepalive
@@ -110,11 +221,9 @@ class peer_manager:
                 signing_key, verifying_key = node_handshake_id.keypair()
                 peer_id = node_handshake_id.perform_handshake_exchange(self.ctx, s, signing_key, verifying_key)
                 peer.peer_id = peer_id
+                logger.debug(f"ID: {hexlify(peer_id)}")
 
                 self.send_keepalive_packet(s)
-
-                if self.verbosity >= 2:
-                    print('  ID:%s' % hexlify(peer_id))
 
                 starttime = time.time()
                 while time.time() - starttime <= 10:
@@ -138,58 +247,83 @@ class peer_manager:
 
             return []
 
-    def crawl_once(self):
-        if self.verbosity >= 1:
-            print('Starting a peer crawl')
+    def crawl_once(self, max_workers=4):
+        logger.info("Starting a peer crawl")
 
         # it is important to take a copy of the peers so that it is not changing as we walk it
-        peers_copy = self.get_peers_copy()
+        peers_copy = self.get_peers_as_list()
         assert len(peers_copy) > 0
 
-        for p in peers_copy:
-            if self.verbosity >= 2:
-                print('Query %41s:%5s (score:%4s)' % ('[%s]' % p.ip, p.port, p.score))
+        def crawl_peer(peer: Peer):
+            # catch unexpected exceptions here otherwise they get lost/ignored due to ThreadPoolExecutor
+            try:
+                logger.debug("Query %39s:%5s (score:%4s)" % ('[%s]' % p.ip, p.port, p.score))
+                self.add_peers(peer, self.get_peers_from_peer(peer))
+            except Exception as e:
+                logger.error(f"Unexpected exception while crawling peer [{peer.ip}]:{peer.port}", exc_info=True, stack_info=True)
 
-            new_peers = self.get_peers_from_peer(p)
-            self.add_peers(new_peers)
+        with ThreadPoolExecutor(max_workers=max_workers) as t:
+            for p in peers_copy:
+                t.submit(crawl_peer, peer=p)
 
-    def crawl(self, forever, delay):
+    def crawl(self, forever, delay, max_workers=4):
         initial_peers = get_all_dns_addresses_as_peers(self.ctx['peeraddr'], self.ctx['peerport'], -1)
+        for peer in initial_peers:
+            self.add_peers(peer, [])
 
-        self.add_peers(initial_peers)
-        if self.verbosity >= 1:
-            print(self)
-
-        self.crawl_once()
-        if self.verbosity >= 1:
-            print(self)
+        self.crawl_once(max_workers)
+        logger.info(self)
 
         count = 1
         while forever:
-            # for a faster startup, do not delay the first 5 times
-            if count > 5:
+            if count > 5:  # for a faster startup, do not delay the first 5 times
                 time.sleep(delay)
-            self.crawl_once()
-            if self.verbosity >= 1:
-                print(self)
+
+            self.crawl_once(max_workers)
+            logger.info(self)
             count += 1
 
+    # noinspection PyUnresolvedReferences
+    def get_dot_string(self, should_draw_edge: Callable[[Peer, Peer], bool] = None) -> str:
+        def get_label(p: Peer) -> str:
+            if p.ip.ipv6.ipv4_mapped is None:
+                address = f"{p.ip.ipv6}"
+            else:
+                address = f"{p.ip.ipv6.ipv4_mapped}"
+
+            if p.port != self.ctx["peerport"]:
+                address = f"[{address}]:{p.port}"
+
+            return address
+
+        graph = Dot("network_connections", graph_type="digraph")
+        for node, peers in self.get_connections_graph().items():
+            for peer in peers:
+                if should_draw_edge is not None and not should_draw_edge(node, peer):
+                    continue
+
+                graph.add_edge(Edge(get_label(node), get_label(peer)))
+
+        return graph.to_string()
+
+    def peer_to_string(self, p: Peer) -> str:
+        s = '%39s:%5s score=%-4s' % (p.ip, p.port, p.score)
+
+        if p.telemetry:
+            s += ' v%-10s' % p.telemetry.get_sw_version()
+            s += ' cc=%11s' % format(p.telemetry.cemented_count, ',')
+
+        s += ' (voting)\n' if p.is_voting else '\n'
+        return s
+
     def __str__(self):
-        with self.mutex:
-            good = reduce(lambda c, p: c + int(p.score >= 1000), self.peers, 0)
-            s = '---------- Start of Manager peers (%s peers, %s good) ----------\n' % (len(self.peers), good)
-            for p in self.peers:
-                voting_str = ' (voting)' if p.is_voting else ''
-                sw_ver = ''
-                cemented_count = ''
-                if p.telemetry:
-                    sw_ver = ' v' + p.telemetry.get_sw_version()
-                    cemented_count = ' cc=%s' % p.telemetry.cemented_count
-                s += '%41s:%5s (score:%4s)%s%s%s\n' % \
-                     ('[%s]' % p.ip, p.port, p.score, sw_ver, cemented_count, voting_str)
-                # if p.score >= 1000:
-                #    s += 'ID: %s, voting:%s\n' % (acctools.to_account_addr(p.peer_id, prefix='node_'), p.is_voting)
-            s += '---------- End of Manager peers (%s peers, %s good) ----------' % (len(self.peers), good)
+        peers = self.get_peers_as_list()
+        good = reduce(lambda c, p: c + int(p.score >= 1000), peers, 0)
+        s = '---------- Start of Manager peers (%s peers, %s good) ----------\n' % (len(peers), good)
+        for p in peers:
+            s += self.peer_to_string(p)
+        s += '---------- End of Manager peers (%s peers, %s good) ----------' % (len(peers), good)
+
         return s
 
 
@@ -202,10 +336,11 @@ def parse_args():
     group.add_argument('-t', '--test', action='store_true', default=False,
                        help='use test network')
 
-    parser.add_argument('-c', '--connect', nargs='?', const='::ffff:78.46.80.199',
+    # empty string singifies existance of switch but lack of argument
+    parser.add_argument('-c', '--connect', nargs='?', const='',
                         help='connect to peercrawler service given by arg and get list of peers')
 
-    parser.add_argument('-v', '--verbosity', type=int,
+    parser.add_argument('-v', '--verbosity', type=int, default=0,
                         help='verbosity level')
     parser.add_argument('-f', '--forever', action='store_true', default=False,
                         help='loop forever looking for new peers')
@@ -213,6 +348,8 @@ def parse_args():
                         help='delay between crawls in seconds')
     parser.add_argument('-s', '--service', action='store_true', default=False,
                         help='run peer crawler as a service')
+    parser.add_argument('-l', '--nolisten', action='store_true', default=False,
+                        help='listen to incoming connections')
     parser.add_argument('-p', '--port', type=int, default=7070,
                         help='tcp port number to listen on in service mode')
     return parser.parse_args()
@@ -276,57 +413,6 @@ class peer_crawler_thread(threading.Thread):
         print('Peer crawler thread ended')
 
 
-class network_connections():
-    def __init__(self, peerman: peer_manager, inactivity_threshold_seconds=0, verbosity=0):
-        self.peerman = peerman
-        self.inactivity_threshold_seconds = inactivity_threshold_seconds
-        self.verbosity = verbosity
-
-        self.__connections: dict[Peer, set[Peer]] = {}
-
-    def register_connections(self, peer: Peer, new_peers: Iterable[Peer]):
-        for new_peer in new_peers:
-            if new_peer.ip.ipv6.is_unspecified:
-                continue
-
-            if new_peer not in self.__connections:
-                self.__connections[new_peer] = set()
-
-            peer_connections = self.__connections[peer]
-            if new_peer in peer_connections:
-                find_peer(new_peer, peer_connections).last_seen = int(time.time())
-            else:
-                peer_connections.add(new_peer)
-
-    def get_connections(self) -> dict[Peer, set[Peer]]:
-        return copy.deepcopy(self.__connections)
-
-    def run(self, initial_peer: Peer, interval_seconds=0):
-        self.__connections[initial_peer] = set()
-
-        while True:
-            peers_list = [peer for peer in self.__connections]
-            for peer in peers_list:
-                new_peers = self.peerman.get_peers_from_peer(peer)
-                self.register_connections(peer, new_peers)
-                print(f"Received peers from {peer.ip}, active peer count for this peer is now {self.__connections[peer].__len__()}\nNow tracking {len(self.__connections)} peers in total")
-
-            if self.inactivity_threshold_seconds > 0:
-                for _, peers in self.__connections.items():
-                    cleanup_inactive_peers(peers, self.inactivity_threshold_seconds, self.verbosity)
-
-            time.sleep(interval_seconds)
-
-    def get_connections_flat(self) -> set[tuple[Peer, Peer]]:
-        connections = set()
-
-        for peer_origin, peers in self.__connections.items():
-            for peer_destination in peers:
-                connections.add((peer_origin, peer_destination))
-
-        return connections
-
-
 def spawn_peer_crawler_thread(ctx, forever, delay, verbosity):
     t = peer_crawler_thread(ctx, forever, delay, verbosity)
     t.start()
@@ -346,34 +432,23 @@ def run_peer_service_forever(peerman, addr='', port=7070):
                 conn.settimeout(10)
                 hdr = peer_service_header(peerman.ctx["net_id"], peerman.count_good_peers(), peerman.count_peers())
                 data = hdr.serialise()
-                json_list = jsonpickle.encode(peerman.get_peers_copy())
+                json_list = jsonpickle.encode(peerman.get_peers_as_list())
                 data += json_list.encode()
                 conn.sendall(data)
 
 
-def get_peers_from_service(ctx, addr='::ffff:78.46.80.199'):
-    with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as s:
-        s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
-        s.settimeout(10)
-        try:
-            s.connect((addr, ctx['peercrawlerport']))
-            response = readall(s)
-            hdr = peer_service_header.parse(response[0:peer_service_header.size])
-            assert (hdr.protocol_ver == 3)
-            if hdr.net_id != ctx['net_id']:
-                raise PeerServiceUnavailable("Peer service for the given network is unavailable")
-        except (PyNanoCoinException, OSError, TypeError) as e:
-            print("Error getting peers: %s" % str(e))
-            raise PeerServiceUnavailable("Peer service is unavailable")
-
-        json_peers = response[peer_service_header.size:]
-        peers = jsonpickle.decode(json_peers)
-    return hdr, peers
+def get_peers_from_service(ctx: dict, url = None):
+    if url is None:
+        url = ctx['peerserviceurl']
+    session = requests.Session()
+    resp = session.get(url, timeout=5)
+    json_resp = resp.json()
+    return [ Peer.from_json(r) for r in json_resp ]
 
 
 def get_initial_connected_socket(ctx, peers=None):
     if peers is None or len(peers) == 0:
-        _, peers = get_peers_from_service(ctx)
+        peers = get_peers_from_service(ctx)
         peers = list(peers)
         random.shuffle(peers)
     for peer in peers:
@@ -398,7 +473,7 @@ def get_random_peer(ctx, filter_func=None):
         applies the filter function, if given
         and return a random peer from the filtered set
     '''
-    hdr, peers = get_peers_from_service(ctx)
+    peers = get_peers_from_service(ctx)
     if filter_func is not None:
         peers = list(filter(filter_func, peers))
     return random.choice(peers)
@@ -415,8 +490,8 @@ def string_to_bytes(string, length):
 
 def do_connect(ctx, server):
     print('server =', server)
-    _, peers = get_peers_from_service(ctx, addr=server)
-    peerman = peer_manager(ctx, peers, 2)
+    peers = get_peers_from_service(ctx, url=server)
+    peerman = peer_manager(ctx, peers=peers, verbosity=2, listen=False)
     print(peerman)
 
 
@@ -434,58 +509,16 @@ def send_confirm_req_genesis(ctx, peer, s):
     return outcome
 
 
-# NOTE: this is a free standing function because it is used by both peer and conection managers
-def cleanup_inactive_peers(peers: set[Peer], inactivity_threshold_seconds: int, verbosity: int):
-    for peer in peers.copy():
-        if int(time.time()) - peer.last_seen > inactivity_threshold_seconds:
-            if verbosity >= 2:
-                print('removing inactive peer %s' % peer)
-            peers.remove(peer)
-
-
-def find_peer(item: Peer, collection: set[Peer]) -> Optional[Peer]:
-    for i in collection:
-        if i == item:
-            return i
-
-    return None
-
-
-# noinspection PyUnresolvedReferences
-def get_dot_string(connections: dict[Peer, set[Peer]], only_voting: bool = False) -> str:
-    def get_label(p: Peer) -> str:
-        if p.ip.ipv6.ipv4_mapped is None:
-            ip = f"[{p.ip.ipv6}]"
-        else:
-            ip = f"[{p.ip.ipv6.ipv4_mapped}]"
-
-        if p.port == 7075:
-            port = ""
-        else:
-            port = f":{p.port}"
-
-        return ip + port
-
-    graph = Dot("network_connections", graph_type="digraph")
-    for node, peers in connections.items():
-        for peer in peers:
-            if only_voting and not (node.is_voting and peer.is_voting):
-                continue
-
-            graph.add_edge(Edge(get_label(node), get_label(peer)))
-
-    return graph.to_string()
-
-
 def main():
     args = parse_args()
+    _logger.setup_logger(logger, _logger.get_logging_level_from_int(args.verbosity))
 
     ctx = livectx
     if args.beta: ctx = betactx
     if args.test: ctx = testctx
 
-    if args.connect:
-        do_connect(ctx, args.connect)
+    if args.connect is not None:
+        do_connect(ctx, None if args.connect == '' else args.connect)
         sys.exit(0)
 
     if args.service:
@@ -494,7 +527,7 @@ def main():
         run_peer_service_forever(crawler_thread.peerman, port=args.port)
     else:
         verbosity = args.verbosity if (args.verbosity is not None) else 1
-        peerman = peer_manager(ctx, verbosity=verbosity)
+        peerman = peer_manager(ctx, listen=(not args.nolisten), verbosity=verbosity)
         peerman.crawl(args.forever, args.delay)
 
 
